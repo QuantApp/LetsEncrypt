@@ -150,7 +150,8 @@ namespace McMaster.AspNetCore.LetsEncrypt.Internal
             if (!_hasRegistered)
             {
                 _hasRegistered = true;
-                await factory.RegisterUserAsync(cancellationToken);
+
+                await factory.GetOrRegisterAccountAsync(cancellationToken);
             }
 
             try

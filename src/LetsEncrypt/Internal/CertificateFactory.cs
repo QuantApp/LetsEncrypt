@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
@@ -10,6 +11,7 @@ using System.Threading.Tasks;
 using Certes;
 using Certes.Acme;
 using Certes.Acme.Resource;
+using McMaster.AspNetCore.LetsEncrypt.Accounts;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -24,44 +26,111 @@ namespace McMaster.AspNetCore.LetsEncrypt.Internal
     {
         private readonly IOptions<LetsEncryptOptions> _options;
         private readonly IHttpChallengeResponseStore _challengeStore;
+        private readonly IAccountRepository _accountRepository;
         private readonly ILogger _logger;
-        private readonly AcmeContext _context;
-        private IAccountContext? _account;
+        private AcmeContext? _context;
+        private IAccountContext? _accountContext;
 
         public CertificateFactory(
             IOptions<LetsEncryptOptions> options,
             IHttpChallengeResponseStore challengeStore,
+            IAccountRepository accountRepository,
             ILogger logger,
             IHostEnvironment env)
         {
             _options = options;
             _challengeStore = challengeStore;
+            _accountRepository = accountRepository;
             _logger = logger;
             AcmeServer = GetAcmeServer(_options.Value, env);
-            _context = new AcmeContext(AcmeServer);
         }
 
         public Uri AcmeServer { get; }
 
-        public async Task RegisterUserAsync(CancellationToken cancellationToken)
+        public async Task GetOrRegisterAccountAsync(CancellationToken cancellationToken)
         {
-            var options = _options.Value;
+            var account = await _accountRepository.GetAccountAsync(cancellationToken);
+
+            var acmeAccountKey = account != null
+                ? KeyFactory.FromDer(account.KeyMaterial)
+                : null;
+
+            _context = new AcmeContext(AcmeServer, acmeAccountKey);
+
+            if (account != null && await ExistingAccountIsValidAsync(_context))
+            {
+                return;
+            }
+
+            await CreateAccount(cancellationToken);
+
+            _logger.LogDebug("Using Let's Encrypt Account {accountId}", _accountContext?.Location);
+        }
+
+        private async Task CreateAccount(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Debug.Assert(_context != null);
 
             var tosUri = await _context.TermsOfService();
+
             EnsureAgreementToTermsOfServices(tosUri);
 
-            _logger.LogDebug("Terms of service has been accepted");
-
-            cancellationToken.ThrowIfCancellationRequested();
-
+            var options = _options.Value;
             _logger.LogInformation("Creating certificate registration for {email}", options.EmailAddress);
-            _account = await _context.NewAccount(options.EmailAddress, termsOfServiceAgreed: true);
-            _logger.LogAcmeAction("NewRegistration", _account);
+            _accountContext = await _context.NewAccount(options.EmailAddress, termsOfServiceAgreed: true);
+            _logger.LogAcmeAction("NewRegistration", _accountContext);
 
+            var account = new AccountModel
+            {
+                EmailAddresses = new[] { options.EmailAddress },
+                KeyMaterial = _context.AccountKey.ToDer(),
+                DirectoryUri = _context.DirectoryUri,
+            };
+
+            await _accountRepository.SaveAccountAsync(account, cancellationToken);
+        }
+
+        private async Task<bool> ExistingAccountIsValidAsync(AcmeContext context)
+        {
+            // double checks the account is still valid
+            Account existingAccount;
+            try
+            {
+                _accountContext = await context.Account();
+                existingAccount = await _accountContext.Resource();
+            }
+            catch (AcmeRequestException exception)
+            {
+                _logger.LogWarning(
+                    "An account key for a Let's Encrypt account was found, but could not be matched to a valid account. Validation error: {acmeError}",
+                    exception.Error);
+                return false;
+            }
+
+            if (existingAccount.Status != AccountStatus.Valid)
+            {
+                _logger.LogWarning(
+                    "An account key for a Let's Encrypt account was found, but the account is no longer valid. Account status: {status}." +
+                    "A new account will be registered.",
+                    existingAccount.Status);
+                return false;
+            }
+
+            if (existingAccount.TermsOfServiceAgreed != true)
+            {
+                var tosUri = await _context.TermsOfService();
+                EnsureAgreementToTermsOfServices(tosUri);
+                await _accountContext.Update(agreeTermsOfService: true);
+            }
+
+            return true;
         }
 
         public async Task<X509Certificate2> CreateCertificateAsync(CancellationToken cancellationToken)
         {
+            Debug.Assert(_context != null);
+
             cancellationToken.ThrowIfCancellationRequested();
             var order = await _context.NewOrder(_options.Value.DomainNames);
 
@@ -101,6 +170,7 @@ namespace McMaster.AspNetCore.LetsEncrypt.Internal
         {
             if (_options.Value.AcceptTermsOfService)
             {
+                _logger.LogDebug("Terms of service has been accepted");
                 return;
             }
 

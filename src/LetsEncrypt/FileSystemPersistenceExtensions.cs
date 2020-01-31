@@ -13,13 +13,14 @@ namespace McMaster.AspNetCore.LetsEncrypt
     public static class FileSystemStorageExtensions
     {
         /// <summary>
-        /// Save generated certificates to a directory in the .pfx format.
+        /// Save Let's Encrypt data to a directory.
+        /// Certificates are stored in the .pfx format, and account information is stored in JSON files.
         /// </summary>
         /// <param name="builder"></param>
         /// <param name="directory">The directory where .pfx files will be saved.</param>
         /// <param name="pfxPassword">Set to null or empty for passwordless .pfx files.</param>
         /// <returns></returns>
-        public static ILetsEncryptServiceBuilder PersistCertificatesToDirectory(
+        public static ILetsEncryptServiceBuilder PersistDataToDirectory(
             this ILetsEncryptServiceBuilder builder,
             DirectoryInfo directory,
             string? pfxPassword)
@@ -34,7 +35,10 @@ namespace McMaster.AspNetCore.LetsEncrypt
                 throw new ArgumentNullException(nameof(directory));
             }
 
-            builder.Services.AddSingleton<ICertificateRepository>(new FileSystemCertificateRepository(directory, pfxPassword));
+            var fileSystemRepo = new FileSystemCertificateRepository(directory, pfxPassword);
+            builder.Services
+                .AddSingleton<ICertificateRepository>(fileSystemRepo)
+                .AddSingleton<IAccountRepository>(fileSystemRepo);
             return builder;
         }
     }

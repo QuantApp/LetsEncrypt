@@ -53,7 +53,7 @@ namespace LetsEncrypt.UnitTests
             var services = new ServiceCollection()
                 .AddLogging()
                 .AddLetsEncrypt()
-                .PersistCertificatesToDirectory(dir, "testpassword")
+                .PersistDataToDirectory(dir, "testpassword")
                 .Services
                 .BuildServiceProvider(validateScopes: true);
 
